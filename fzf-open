@@ -122,20 +122,48 @@ extract() {
 		}
 		return 0
 	}
-	{
-		LINE = $0
-		gsub(/\033\][^\007\033]*(\007|\033\\)?/, "", LINE)
-		gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "", LINE)
-		LC = tolower(LINE)
-		for (pos = 1; ; pos = bs + bl) {
-			best = 0
-			for (r = 1; r <= 5; r++)
-				if (cand(r, pos) && (!best || CS < bs)) { best = r; bs = CS; bl = CL; bu = CU }
-			if (!best) break
-			urls[++n] = bu
-		}
+	# Characters, not bytes: UTF-8 continuation bytes are not counted.
+	function chars(s) { return length(s) - gsub(/[\200-\277]/, "&", s) }
+	# Moves the start of line j onto line i when line i ends in a URL and line j continues it at
+	# the same indentation (not with a URL of its own). Leaves the rest of line j in REST and its
+	# former width in WJ.
+	function cont(i, j,   ind, nx) {
+		if (!match(LN[i], T "+$") || tolower(substr(LN[i], RSTART)) !~ /:\/\/|^www\./) return 0
+		match(LN[i], /^[ \t]*/); ind = substr(LN[i], 1, RLENGTH)
+		if (substr(LN[j], 1, length(ind)) != ind) return 0
+		nx = substr(LN[j], length(ind) + 1)
+		if (!match(nx, "^" T "+") || tolower(nx) ~ /^(https?|ftp|file):\/\//) return 0
+		WJ = chars(LN[j]); REST = substr(nx, RLENGTH + 1)
+		LN[i] = LN[i] substr(nx, 1, RLENGTH); LN[j] = REST
+		return 1
 	}
-	END { for (i = n; i >= 1; i--) if (!seen[urls[i]]++) print urls[i] }
+	{
+		gsub(/\033\][^\007\033]*(\007|\033\\)?/, "")
+		gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "")
+		LN[++nl] = $0
+		if (chars($0) > W) W = chars($0)
+	}
+	END {
+		# TUIs such as Claude Code break a long URL into lines at the pane edge themselves, so
+		# herdr cannot unwrap it. A URL reaching the edge carries on into the next line(s).
+		# ponytail: the edge is the longest line on screen, within 1 column; wide (CJK) characters
+		# count as 1, so an edge set only by such a line is missed.
+		for (i = 1; i < nl; i++) {
+			full = chars(LN[i]) >= W - 1
+			for (j = i + 1; j <= nl && full && cont(i, j); j++) full = REST == "" && WJ >= W - 1
+		}
+		for (i = 1; i <= nl; i++) {
+			LINE = LN[i]; LC = tolower(LINE)
+			for (pos = 1; ; pos = bs + bl) {
+				best = 0
+				for (r = 1; r <= 5; r++)
+					if (cand(r, pos) && (!best || CS < bs)) { best = r; bs = CS; bl = CL; bu = CU }
+				if (!best) break
+				urls[++n] = bu
+			}
+		}
+		for (i = n; i >= 1; i--) if (!seen[urls[i]]++) print urls[i]
+	}
 	'
 }
 

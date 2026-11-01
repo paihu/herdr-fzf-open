@@ -42,6 +42,20 @@ check "newest first, deduped, ansi stripped" \
 	"https://a/1 https://a/2" \
 	"$(extract 'https://a/1\n\033[32mhttps://a/2\033[0m\nhttps://a/1\n')"
 
+RULE='────────────────────' # 20 columns: the pane width the hard-wrap cases below are cut at
+check "a url hard-wrapped at the pane edge is joined" \
+	"https://a/b/c/d/e/f?x=1" \
+	"$(extract "$RULE"'\nsee https://a/b/c/d/\ne/f?x=1 trailing')"
+check "an indented url over three lines is joined" \
+	"https://claude.ai/oauth/authorize?code=true" \
+	"$(extract "$RULE"'\n  https://claude.ai/\n  oauth/authorize?co\n  de=true')"
+check "a url short of the edge is not joined" \
+	"https://a/b" \
+	"$(extract "$RULE"'\nsee https://a/b\nnext line')"
+check "a full-width url followed by another url stays apart" \
+	"https://x/y https://a/b/c/d/e/f/g/" \
+	"$(extract "$RULE"'\nhttps://a/b/c/d/e/f/g/\nhttps://x/y')"
+
 check "browser alternatives fall through and %s is replaced" \
 	"got https://a" \
 	"$(browse https://a 'nope-x:echo got %s')"

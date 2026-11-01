@@ -65,7 +65,9 @@ What you see is what you can pick — no more, no less. If there is none, nothin
 
 If you have scrolled the pane back, the picker uses the part you scrolled to. Soft-wrapped lines are
 joined back together so a long URL stays in one piece — except while scrolled back, where herdr can
-only hand over the screen as rendered.
+only hand over the screen as rendered. URLs that a TUI breaks into lines itself (`claude` `/login`,
+for one) are joined too: a URL that reaches the right edge of the pane carries on into the next line
+at the same indentation, unless that line starts a URL of its own.
 
 ## Browser targets
 
