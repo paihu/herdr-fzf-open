@@ -56,7 +56,8 @@ check "unset BROWSER is reported" \
 	"$(browse https://a '')"
 
 # The picker against a fake herdr (one URL on screen, records `plugin pane open`) and a fake fzf
-# (records its args, answers with $FAKE_KEY and the first URL).
+# (records its args, answers with $FAKE_KEY and the first URL; in the target list it picks the line for
+# $FAKE_TARGET, or cancels like esc when there is none).
 FAKE=$(mktemp -d)
 trap 'rm -rf "$FAKE"' EXIT
 cat >"$FAKE/herdr" <<'EOF'
@@ -70,19 +71,24 @@ esac
 EOF
 cat >"$FAKE/fzf" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$@" >"$FAKE/fzf-args"
-printf '%s\n' "$FAKE_KEY" "$(head -n 1)"
+case "$*" in
+*--prompt=open\ with*) grep "^$FAKE_TARGET	" || exit 130 ;;
+*)
+	printf '%s\n' "$@" >"$FAKE/fzf-args"
+	printf '%s\n' "$FAKE_KEY" "$(head -n 1)"
+	;;
+esac
 EOF
 chmod +x "$FAKE/herdr" "$FAKE/fzf"
 mkdir "$FAKE/config"
 export FAKE HERDR_BIN_PATH="$FAKE/herdr" FZF_OPEN_SOURCE_PANE=w1:p1
 
-# Picks with key $1, targets file $2 (none when empty) and $BROWSER $3; prints the BROWSER handed
-# to the split, or the error.
+# Picks with key $1, targets file $2 (none when empty), $BROWSER $3 and, for ctrl-x, the listed
+# target $4; prints the BROWSER handed to the split, or the error.
 pick_with() {
 	rm -f "$FAKE/herdr-args" "$FAKE/config/targets"
 	[ -z "$2" ] || printf '%s\n' "$2" >"$FAKE/config/targets"
-	err=$(FAKE_KEY=$1 BROWSER=$3 PATH="$FAKE:$PATH" HERDR_PLUGIN_CONFIG_DIR="$FAKE/config" \
+	err=$(FAKE_KEY=$1 BROWSER=$3 FAKE_TARGET=${4:-} PATH="$FAKE:$PATH" HERDR_PLUGIN_CONFIG_DIR="$FAKE/config" \
 		${SH:-sh} fzf-open picker </dev/null 2>&1)
 	if [ -f "$FAKE/herdr-args" ]; then sed -n 's/^BROWSER=//p' "$FAKE/herdr-args"; else echo "$err"; fi
 }
@@ -100,8 +106,11 @@ check "enter opens the enter target over \$BROWSER" "wslview" "$(pick_with '' "$
 check "without an enter target, enter falls back to \$BROWSER" "xdg-open" \
 	"$(pick_with '' 'ctrl-o w3m' xdg-open)"
 check "the header names each target by its program" \
-	"enter: wslview | ctrl-o: w3m | ctrl-t: brave.exe | ctrl-y: copy | esc: cancel" \
+	"enter: wslview | ctrl-o: w3m | ctrl-t: brave.exe | ctrl-x: choose | ctrl-y: copy | esc: cancel" \
 	"$(pick_with '' "$TARGETS" xdg-open >/dev/null; header)"
+check "ctrl-x opens the target chosen from the list" "w3m -o x=1" \
+	"$(pick_with ctrl-x "$TARGETS" xdg-open ctrl-o)"
+check "cancelling the target list opens nothing" "" "$(pick_with ctrl-x "$TARGETS" xdg-open none)"
 check "no target at all is reported" \
 	"fzf-open: no browser: set BROWSER or add targets to $FAKE/config/targets" \
 	"$(pick_with '' '' '')"

@@ -59,6 +59,7 @@ What you see is what you can pick — no more, no less. If there is none, nothin
 |---|---|
 | `enter` | open with `$BROWSER` (or the `enter` target) in a split and focus it |
 | other target keys | open with that target — see [Browser targets](#browser-targets) |
+| `ctrl-x` | choose the target from a second fzf list, then open |
 | `ctrl-y` | copy to clipboard |
 | `esc` | cancel |
 
@@ -80,7 +81,8 @@ ctrl-t    terminal-browser open
 
 Keys are [fzf key names](https://junegunn.github.io/fzf/reference/#available-keys-synonyms); the picker's
 header shows each one with its program. `$BROWSER` still serves as `enter` unless the file binds
-`enter`, and `open` from the command line uses the `enter` target. `ctrl-y` stays copy.
+`enter`, and `open` from the command line uses the `enter` target. `ctrl-x` (pick a target from a
+list) and `ctrl-y` (copy) are reserved.
 
 ## What gets extracted
 

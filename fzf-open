@@ -2,7 +2,8 @@
 # herdr plugin: pick a URL printed in a pane with fzf and open it with $BROWSER in a split beside it.
 #
 #   pick      herdr action: no TTY, so it only checks for URLs and opens the `picker` popup
-#   picker    herdr popup: fzf over the source pane's URLs; a target's key opens, ctrl-y copies
+#   picker    herdr popup: fzf over the source pane's URLs; a target's key opens, ctrl-x lists the
+#             targets, ctrl-y copies
 #   browser   herdr split pane: becomes `$BROWSER <url>`
 #   open URL  the split on its own with the enter target, from a shell inside herdr
 #   extract   stdin in, URLs out (newest first)
@@ -178,10 +179,10 @@ picker() {
 		match($2, /^[ \t]*([^ \t\\:]|\\.)+/); w = substr($2, RSTART, RLENGTH)
 		gsub(/^[ \t]+|\\/, "", w); sub(/.*\//, "", w)
 		printf "%s: %s | ", $1, w
-	} END { printf "ctrl-y: copy | esc: cancel" }')
+	} END { printf "ctrl-x: choose | ctrl-y: copy | esc: cancel" }')
 	keys=$(printf '%s\n' "$T" | awk -F '\t' '$1 != "enter" { printf ",%s", $1 }')
 	st=0
-	out=$(printf '%s\n' "$urls" | fzf --expect="ctrl-y$keys" --no-preview --layout=reverse --prompt='url> ' \
+	out=$(printf '%s\n' "$urls" | fzf --expect="ctrl-x,ctrl-y$keys" --no-preview --layout=reverse --prompt='url> ' \
 		--header="$header") || st=$?
 	case $st in
 	0) ;;
@@ -190,6 +191,11 @@ picker() {
 	esac
 	key=$(printf '%s\n' "$out" | sed -n 1p)
 	url=$(printf '%s\n' "$out" | sed -n 2p)
+	if [ "$key" = ctrl-x ]; then
+		# Esc here cancels the whole pick, like esc in the URL list.
+		line=$(printf '%s\n' "$T" | fzf --no-preview --layout=reverse --prompt='open with> ' --header="$url") || return 0
+		key=${line%%"$(printf '\t')"*}
+	fi
 	if [ "$key" = ctrl-y ]; then
 		printf '%s\n' "$url" | copy || die "could not copy (needs pbcopy, wl-copy, xclip or xsel)"
 	else
