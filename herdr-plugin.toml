@@ -1,0 +1,36 @@
+id = "paihu.fzf-open"
+name = "fzf open"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Pick a URL from the current pane with fzf and open it in $BROWSER (split pane)"
+platforms = ["macos", "linux"]
+
+# A POSIX sh script, run through `sh` so it needs no execute bit and no build step.
+
+# Keybinding target. Actions have no TTY, so this checks the pane for URLs and opens the `picker`
+# popup for it (a popup process gets no HERDR_PANE_ID of its own, hence the hand-off). With no URL
+# on screen it does nothing.
+[[actions]]
+id = "pick"
+title = "Open URL in $BROWSER"
+contexts = ["pane"]
+command = ["sh", "fzf-open", "pick"]
+
+# The fzf UI. A popup is a real PTY that closes when the command exits and never changes the
+# tiled layout. An overlay was tried and rejected: its zoom in and out is more disruptive.
+[[panes]]
+id = "picker"
+title = "fzf open"
+placement = "popup"
+width = "80%"
+height = "50%"
+command = ["sh", "fzf-open", "picker"]
+
+# The browser pane. The picker opens it as a split next to the source pane; the script becomes
+# `$BROWSER <url>` via exec, so no shell prompt is echoed while the browser starts. A terminal
+# browser draws here; a GUI launcher (xdg-open, wslview, open) hands off and the pane closes.
+[[panes]]
+id = "browser"
+title = "browser"
+placement = "split"
+command = ["sh", "fzf-open", "browser"]

@@ -1,0 +1,240 @@
+#!/bin/sh
+# herdr plugin: pick a URL printed in a pane with fzf and open it with $BROWSER in a split beside it.
+#
+#   pick      herdr action: no TTY, so it only checks for URLs and opens the `picker` popup
+#   picker    herdr popup: fzf over the source pane's URLs; a target's key opens, ctrl-y copies
+#   browser   herdr split pane: becomes `$BROWSER <url>`
+#   open URL  the split on its own with the enter target, from a shell inside herdr
+#   extract   stdin in, URLs out (newest first)
+# shellcheck disable=SC2016 # `"$url"` for eval is meant literally
+set -eu
+
+ID=paihu.fzf-open
+HERDR=${HERDR_BIN_PATH:-herdr}
+# A popup gets no HERDR_PANE_ID of its own (herdr strips it, even via --env), so `pick` forwards it.
+SRC=${FZF_OPEN_SOURCE_PANE:-${HERDR_PANE_ID:-}}
+WAIT=
+
+die() {
+	printf 'fzf-open: %s\n' "$*" >&2
+	# A plugin pane closes when we exit; let the message be read first.
+	if [ -n "$WAIT" ] && [ -t 0 ]; then
+		printf '\nPress Enter to close...' >&2
+		read -r _ || :
+	fi
+	exit 1
+}
+
+need_source() { [ -n "$SRC" ] || die "could not determine the source pane (FZF_OPEN_SOURCE_PANE or HERDR_PANE_ID)"; }
+need_browser() { [ -n "${BROWSER:-}" ] || die "BROWSER is not set"; }
+
+targets_file() { echo "${HERDR_PLUGIN_CONFIG_DIR:-$("$HERDR" plugin config-dir "$ID")}/targets"; }
+
+# Sets T to the browser targets as `key<TAB>command` lines, enter first: `key command` lines of
+# the targets file (# comments), then $BROWSER as enter unless the file binds enter.
+load_targets() {
+	f=$(targets_file)
+	T=$({
+		[ ! -f "$f" ] || cat "$f"
+		[ -z "${BROWSER:-}" ] || printf 'enter %s\n' "$BROWSER"
+	} | awk '
+		NF < 2 || /^[ \t]*#/ { next }
+		{ k = $1; sub(/^[ \t]*[^ \t]+[ \t]+/, "") }
+		seen[k]++ { next }
+		k == "enter" { print k "\t" $0; next }
+		{ rest[++n] = k "\t" $0 }
+		END { for (i = 1; i <= n; i++) print rest[i] }
+	')
+	[ -n "$T" ] || die "no browser: set BROWSER or add targets to $f"
+}
+
+target_for() { printf '%s\n' "$T" | awk -F '\t' -v k="$1" '$1 == k { print substr($0, length(k) + 2); exit }'; }
+
+# What the pane shows right now. At the bottom, the last viewport_rows rows unwrapped are the
+# screen with soft-wrapped lines joined; while scrolled back only `visible` follows the scroll.
+read_screen() {
+	jq=$(command -v jq || command -v gojq) || die "jq or gojq is required"
+	scroll=$("$HERDR" pane get "$SRC" | "$jq" -r '.result.pane.scroll | "\(.offset_from_bottom) \(.viewport_rows)"')
+	case $scroll in
+	"0 "*) "$HERDR" pane read "$SRC" --source recent-unwrapped --lines "${scroll#0 }" --format text ;;
+	*) "$HERDR" pane read "$SRC" --source visible --format text ;;
+	esac
+}
+
+# Every rule finds its earliest match from the current position; the earliest start wins, ties go
+# to the lower rule, and the winner consumes its span (so https://www.x is not also a www match).
+extract() {
+	LC_ALL=C awk '
+	BEGIN {
+		T = "[^ \t\r\"\047`<>|]"
+		RE[1] = "(https?|ftp|file)://" T "+"
+		RE[2] = "(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\]):[0-9]+(/" T "*)?"
+		RE[3] = "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+(:[0-9]+)?(/" T "*)?"
+		RE[4] = "www\\.[a-z0-9-]+(\\.[a-z0-9-]+)+(:[0-9]+)?(/" T "*)?"
+		RE[5] = "(ssh://)?git@[a-z0-9.-]+[:/]" T "+"
+		OPEN[")"] = "("; OPEN["]"] = "["; OPEN["}"] = "{"
+	}
+	function count(s, ch,   n, i) {
+		while ((i = index(s, ch))) { n++; s = substr(s, i + 1) }
+		return n + 0
+	}
+	# Drops prose punctuation and closing brackets with no opener inside the URL.
+	function trim(s,   c) {
+		while (s != "") {
+			c = substr(s, length(s), 1)
+			if (c in OPEN) { if (count(s, OPEN[c]) >= count(s, c)) break }
+			else if (c !~ /[.,;:!?\047"]/) { if (!sub(/\342\200\246$/, "", s)) break; continue }
+			s = substr(s, 1, length(s) - 1)
+		}
+		return s
+	}
+	# Leftmost match of re in LC at or after `from` that starts a word; sets S and L.
+	function find(re, from) {
+		while (from <= length(LC) && match(substr(LC, from), re)) {
+			S = from + RSTART - 1; L = RLENGTH
+			if (S == 1 || substr(LC, S - 1, 1) !~ /[a-z0-9_]/) return 1
+			from = S + 1
+		}
+		return 0
+	}
+	# Rule r'"'"'s next valid candidate: start CS, consumed length CL, normalised URL CU.
+	function cand(r, from,   m, u, h, p, o, n, i, ok) {
+		while (find(RE[r], from)) {
+			m = substr(LINE, S, L); from = S + L
+			if (r == 3) {
+				h = m; sub(/[:\/].*/, "", h); ok = h != m
+				n = split(h, o, ".")
+				for (i = 1; i <= n; i++) if (length(o[i]) > 3 || o[i] + 0 > 255) ok = 0
+				if (!ok) continue
+			}
+			if (r == 5) {
+				sub(/^(ssh:\/\/)?git@/, "", m); h = m; sub(/[:\/].*/, "", h)
+				p = trim(substr(m, length(h) + 2)); sub(/\.git$/, "", p)
+				if (p == "") continue
+				CS = S; CL = L; CU = "https://" h "/" p
+				return 1
+			}
+			u = trim(m); CS = S; CL = length(u)
+			if (r == 2) sub(/^0\.0\.0\.0/, "localhost", u)
+			CU = (r == 1 ? "" : r == 4 ? "https://" : "http://") u
+			return 1
+		}
+		return 0
+	}
+	{
+		LINE = $0
+		gsub(/\033\][^\007\033]*(\007|\033\\)?/, "", LINE)
+		gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "", LINE)
+		LC = tolower(LINE)
+		for (pos = 1; ; pos = bs + bl) {
+			best = 0
+			for (r = 1; r <= 5; r++)
+				if (cand(r, pos) && (!best || CS < bs)) { best = r; bs = CS; bl = CL; bu = CU }
+			if (!best) break
+			urls[++n] = bu
+		}
+	}
+	END { for (i = n; i >= 1; i--) if (!seen[urls[i]]++) print urls[i] }
+	'
+}
+
+# The split beside the source pane that opens URL $1 with the target bound to key $2.
+open_split() {
+	cmd=$(target_for "$2")
+	[ -n "$cmd" ] || die "no target for $2"
+	"$HERDR" plugin pane open --plugin "$ID" --entrypoint browser --placement split \
+		--target-pane "$SRC" --direction right --focus --env "FZF_OPEN_URL=$1" --env "BROWSER=$cmd" >/dev/null
+}
+
+copy() {
+	if command -v pbcopy >/dev/null; then pbcopy
+	elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null; then wl-copy
+	elif [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null; then xclip -selection clipboard
+	elif [ -n "${DISPLAY:-}" ] && command -v xsel >/dev/null; then xsel --clipboard --input
+	else return 1
+	fi
+}
+
+pick() {
+	need_source
+	screen=$(read_screen)
+	if [ -z "$(printf '%s\n' "$screen" | extract)" ]; then
+		# Only `herdr plugin log list` sees this; a notification would be louder than it deserves.
+		echo "fzf-open: No URLs on screen" >&2
+		return
+	fi
+	"$HERDR" plugin pane open --plugin "$ID" --entrypoint picker --env "FZF_OPEN_SOURCE_PANE=$SRC" >/dev/null
+}
+
+picker() {
+	need_source
+	load_targets
+	command -v fzf >/dev/null || die "fzf was not found in PATH"
+	screen=$(read_screen) || die "could not read pane $SRC"
+	urls=$(printf '%s\n' "$screen" | extract)
+	[ -n "$urls" ] || die "No URLs on screen"
+	# Each target is named in the header by its program: the first word, unescaped, sans directory.
+	header=$(printf '%s\n' "$T" | awk -F '\t' '{
+		match($2, /^[ \t]*([^ \t\\:]|\\.)+/); w = substr($2, RSTART, RLENGTH)
+		gsub(/^[ \t]+|\\/, "", w); sub(/.*\//, "", w)
+		printf "%s: %s | ", $1, w
+	} END { printf "ctrl-y: copy | esc: cancel" }')
+	keys=$(printf '%s\n' "$T" | awk -F '\t' '$1 != "enter" { printf ",%s", $1 }')
+	st=0
+	out=$(printf '%s\n' "$urls" | fzf --expect="ctrl-y$keys" --no-preview --layout=reverse --prompt='url> ' \
+		--header="$header") || st=$?
+	case $st in
+	0) ;;
+	1 | 130) return ;;
+	*) die "fzf failed (exit $st)" ;;
+	esac
+	key=$(printf '%s\n' "$out" | sed -n 1p)
+	url=$(printf '%s\n' "$out" | sed -n 2p)
+	if [ "$key" = ctrl-y ]; then
+		printf '%s\n' "$url" | copy || die "could not copy (needs pbcopy, wl-copy, xclip or xsel)"
+	else
+		open_split "$url" "${key:-enter}" || die "could not open the browser pane"
+	fi
+}
+
+# $BROWSER: `:`-separated alternatives tried in order, each split into words like a shell would,
+# `%s` replaced by the URL or the URL appended. The URL is only ever expanded, never parsed.
+# shellcheck disable=SC2120 # $1 is set by `set --`, not passed in
+browser() {
+	url=${FZF_OPEN_URL:-}
+	[ -n "$url" ] || die "FZF_OPEN_URL is not set (the picker sets it)"
+	need_browser
+	set -f
+	IFS=:
+	for cmd in $BROWSER; do
+		unset IFS
+		case $cmd in
+		*[![:space:]]*) ;;
+		*) continue ;;
+		esac
+		case $cmd in
+		*%s*) cmd=$(printf '%s\n' "$cmd" | sed 's/%s/"$url"/g') ;;
+		*) cmd="$cmd \"\$url\"" ;;
+		esac
+		eval "set -- $cmd"
+		command -v "$1" >/dev/null && exec "$@"
+	done
+	die "could not start $BROWSER"
+}
+
+case ${1:-} in
+pick) pick ;;
+picker) WAIT=1; picker ;;
+browser) WAIT=1; browser ;;
+open)
+	[ $# -eq 2 ] || die "usage: fzf-open open URL"
+	need_source
+	load_targets
+	open_split "$2" enter
+	;;
+extract) extract ;;
+*)
+	echo "usage: fzf-open pick | picker | browser | open URL | extract" >&2
+	exit 2
+	;;
+esac
